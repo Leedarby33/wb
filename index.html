@@ -813,21 +813,45 @@ function calcEta(){
   if(rate<=0)return null;
   return {rate:rate,daysLeft:Math.round((w-GOALS.weight)/rate*7),date:lb.date,w:w};
 }
+// 取最近一次非空值（本次没填就沿用上次）
+function lastVal(field){
+  const a=getBody().slice().sort(function(x,y){return x.date.localeCompare(y.date);});
+  for(let i=a.length-1;i>=0;i--)if(a[i][field]!=null)return a[i][field];
+  return null;
+}
+// 当前各值：本日有就用本日，没填就回退；去脂体重可由体重×（1-体脂）推算
+function curVals(){
+  const lb=latestBody();
+  let ffm=lb.ffm;
+  if(ffm==null&&lb.weight!=null&&lb.bf!=null)ffm=+(lb.weight*(1-lb.bf/100)).toFixed(1);
+  if(ffm==null)ffm=lastVal('ffm');
+  return {
+    weight:lb.weight!=null?lb.weight:lastVal('weight'),
+    bf:lb.bf!=null?lb.bf:lastVal('bf'),
+    waist:lb.waist!=null?lb.waist:lastVal('waist'),
+    ffm:ffm
+  };
+}
 function renderGoal(){
-  const lb=latestBody(),eta=calcEta();
-  const cell=function(label,goal,cur,u){
+  const lb=latestBody(),eta=calcEta(),cv=curVals();
+  const cell=function(label,goal,cur,u,lowerBetter){
+    const big=cur==null?'<span style="color:var(--text-3);font-size:16px">未记录</span>':cur+'<span class="u">'+u+'</span>';
     let sub;
-    if(cur==null)sub='<span style="color:var(--text-3);font-size:11px">未记录</span>';
-    else sub='<span style="font-size:11px;color:var(--text-2)">当前 '+cur+'</span><span style="font-size:10.5px;color:var(--text-3)">'+u+'</span><span style="font-size:11px;color:var(--text-2)"> · </span><b style="font-size:11px;color:var(--blue)">还差 '+(parseFloat(cur)-goal).toFixed(1)+'</b>';
-    return '<div class="goal-item"><div class="goal-label">'+label+'</div><div class="goal-val">'+goal+'<span class="u">'+u+'</span></div><div class="goal-cur" style="margin-top:4px">'+sub+'</div></div>';
+    if(cur==null)sub='目标 '+goal+u;
+    else{
+      const diff=(parseFloat(cur)-goal).toFixed(1);
+      if(lowerBetter)sub=diff>0?'目标 '+goal+u+' · <b style="color:var(--blue)">还差 '+diff+'</b>':'目标 '+goal+u+' · <b style="color:var(--green)">已达标</b>';
+      else sub=diff<0?'目标 '+goal+u+' · <b style="color:var(--blue)">还差 '+(-diff).toFixed(1)+'</b>':'目标 '+goal+u+' · <b style="color:var(--green)">高于目标 '+diff+'</b>';
+    }
+    return '<div class="goal-item"><div class="goal-label">'+label+'</div><div class="goal-val">'+big+'</div><div class="goal-cur" style="margin-top:4px;font-size:11px;color:var(--text-2)">'+sub+'</div></div>';
   };
   let html='<div class="card" style="margin-top:12px">'+
     '<div class="card-title">🎯 整体目标参考</div>'+
     '<div class="goal-grid">'+
-      cell('体重',GOALS.weight,lb.weight,'kg')+
-      cell('体脂率',GOALS.bf,lb.bf,'%')+
-      cell('腰围',GOALS.waist,lb.waist,'cm')+
-      cell('去脂体重',GOALS.ffm,lb.ffm,'kg')+
+      cell('体重',GOALS.weight,cv.weight,'kg',true)+
+      cell('体脂率',GOALS.bf,cv.bf,'%',true)+
+      cell('腰围',GOALS.waist,cv.waist,'cm',true)+
+      cell('去脂体重',GOALS.ffm,cv.ffm,'kg',false)+
     '</div>';
   if(eta){
     const etaDate=new Date();etaDate.setDate(etaDate.getDate()+eta.daysLeft);
@@ -838,13 +862,40 @@ function renderGoal(){
   }else{
     html+='<div class="eta-bar">记一次体重就能算出预计天数。</div>';
   }
+  html+=renderDelta();
   html+='</div>';
   $id('goalCard').innerHTML=html;
 }
 
+// 较上次称重：脂肪/肌肉分解
+function renderDelta(){
+  const a=getBody().slice().sort(function(x,y){return x.date.localeCompare(y.date);});
+  // 找最近两条同时有体重+体脂的记录
+  const valid=a.filter(function(r){return r.weight!=null&&r.bf!=null;});
+  if(valid.length<2)return '';
+  const cur=valid[valid.length-1],prev=valid[valid.length-2];
+  const dw=cur.weight-prev.weight;
+  if(Math.abs(dw)<0.05)return '';
+  const dFat=cur.weight*cur.bf/100-prev.weight*prev.bf/100;
+  const dLean=dw-dFat;
+  const fatPct=dFat/dw*100;
+  const days=Math.round((new Date(cur.date)-new Date(prev.date))/86400000);
+  let verdict,color;
+  if(dw<0){ // 减重期：脂肪占比越高越好
+    if(fatPct>=70){verdict='保肌良好';color='var(--green)';}
+    else if(fatPct>=50){verdict='肌肉流失偏多';color='var(--orange)';}
+    else{verdict='肌肉流失严重';color='var(--red)';}
+  }else{ // 增重期：脂肪占比越低越好
+    if(fatPct<=30){verdict='干净增重';color='var(--green)';}
+    else{verdict='长的多是脂肪';color='var(--orange)';}
+  }
+  const f=function(x){return (x>0?'+':'')+x.toFixed(1);};
+  return '<div class="eta-bar" style="margin-top:6px">较 '+prev.date.slice(5).replace('-','/')+'（'+days+' 天前）：体重 <b>'+f(dw)+'kg</b> = 脂肪 <b>'+f(dFat)+'</b> + 去脂 <b>'+f(dLean)+'</b>，脂肪占比 <b style="color:'+color+'">'+Math.abs(fatPct).toFixed(0)+'%</b> · '+verdict+'</div>';
+}
+
 // ===================== 极简录入 =====================
 function renderEntry(){
-  const lb=latestBody();
+  const lb=curVals();
   const a=getBody().slice().sort(function(x,y){return y.date.localeCompare(x.date);}).slice(0,3);
   const recent=a.map(function(r){
     const p=[];
@@ -868,7 +919,18 @@ function renderEntry(){
         '<div class="inp-row"><label>腰围</label><input type="number" step="0.5" id="inWaist" placeholder="86.5" value="'+(lb.waist!=null?lb.waist:'')+'"><span style="font-size:12px;color:var(--text-3)">cm</span></div>'+
         '<button class="btn-save" onclick="saveWaist()">保存到 '+localTodayStr().slice(5).replace('-','/')+'</button>'+
         '<div class="recent-line">同一部位、同一时间量（早起空腹、肚脐水平）</div>'+
-      '</div></details>';
+      '</div></details>'+
+    '<div style="text-align:center;margin:10px 0 2px"><span onclick="exportBackup()" style="font-size:12.5px;color:var(--blue);cursor:pointer">⬇️ 备份数据（发给 AI 分析用）</span></div>';
+}
+function exportBackup(){
+  const data={exportDate:localTodayStr(),body:getBody(),wish:getWish()};
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='workbench_backup_'+localTodayStr().replace(/-/g,'')+'.json';
+  document.body.appendChild(a);a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);a.remove();},3000);
+  toast('已导出备份');
 }
 function saveBody(){
   const w=parseFloat($id('inW').value),bf=parseFloat($id('inBF').value),ffm=parseFloat($id('inFFM').value);
